@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
+import json
 from pathlib import Path
 
 app = FastAPI(title="Mergington High School API",
@@ -19,8 +20,11 @@ current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
 
-# In-memory activity database
-activities = {
+# Path to activities JSON file
+ACTIVITIES_FILE = current_dir / "activities.json"
+
+# Default activities data
+default_activities = {
     "Chess Club": {
         "description": "Learn strategies and compete in chess tournaments",
         "schedule": "Fridays, 3:30 PM - 5:00 PM",
@@ -77,6 +81,36 @@ activities = {
     }
 }
 
+# Global activities variable
+activities = {}
+
+def load_activities():
+    """Load activities from JSON file, or use defaults if file doesn't exist."""
+    global activities
+    try:
+        if ACTIVITIES_FILE.exists():
+            with open(ACTIVITIES_FILE, 'r') as f:
+                activities = json.load(f)
+        else:
+            activities = default_activities.copy()
+            save_activities()
+    except (json.JSONDecodeError, IOError) as e:
+        # If file is corrupted, use defaults
+        activities = default_activities.copy()
+        save_activities()
+
+def save_activities():
+    """Save activities to JSON file."""
+    try:
+        with open(ACTIVITIES_FILE, 'w') as f:
+            json.dump(activities, f, indent=2)
+    except IOError as e:
+        # Log error but don't crash
+        print(f"Error saving activities: {e}")
+
+# Load activities on startup
+load_activities()
+
 
 @app.get("/")
 def root():
@@ -85,48 +119,84 @@ def root():
 
 @app.get("/activities")
 def get_activities():
-    return activities
+    """Get all activities with their details and current participant count."""
+    try:
+        return activities
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving activities: {str(e)}")
 
 
 @app.post("/activities/{activity_name}/signup")
 def signup_for_activity(activity_name: str, email: str):
     """Sign up a student for an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+    try:
+        # Validate inputs
+        if not activity_name or not activity_name.strip():
+            raise HTTPException(status_code=400, detail="Activity name cannot be empty")
+        if not email or not email.strip():
+            raise HTTPException(status_code=400, detail="Email cannot be empty")
+        if "@mergington.edu" not in email:
+            raise HTTPException(status_code=400, detail="Only Mergington High School emails are allowed")
 
-    # Get the specific activity
-    activity = activities[activity_name]
+        # Validate activity exists
+        if activity_name not in activities:
+            raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Validate student is not already signed up
-    if email in activity["participants"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Student is already signed up"
-        )
+        # Get the specific activity
+        activity = activities[activity_name]
 
-    # Add student
-    activity["participants"].append(email)
-    return {"message": f"Signed up {email} for {activity_name}"}
+        # Validate student is not already signed up
+        if email in activity["participants"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Student is already signed up"
+            )
+
+        # Check if activity is full
+        if len(activity["participants"]) >= activity["max_participants"]:
+            raise HTTPException(status_code=400, detail="Activity is full")
+
+        # Add student
+        activity["participants"].append(email)
+        save_activities()  # Persist changes
+        return {"message": f"Signed up {email} for {activity_name}"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 
 @app.delete("/activities/{activity_name}/unregister")
 def unregister_from_activity(activity_name: str, email: str):
     """Unregister a student from an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+    try:
+        # Validate inputs
+        if not activity_name or not activity_name.strip():
+            raise HTTPException(status_code=400, detail="Activity name cannot be empty")
+        if not email or not email.strip():
+            raise HTTPException(status_code=400, detail="Email cannot be empty")
 
-    # Get the specific activity
-    activity = activities[activity_name]
+        # Validate activity exists
+        if activity_name not in activities:
+            raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Validate student is signed up
-    if email not in activity["participants"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Student is not signed up for this activity"
-        )
+        # Get the specific activity
+        activity = activities[activity_name]
 
-    # Remove student
-    activity["participants"].remove(email)
-    return {"message": f"Unregistered {email} from {activity_name}"}
+        # Validate student is signed up
+        if email not in activity["participants"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Student is not signed up for this activity"
+            )
+
+        # Remove student
+        activity["participants"].remove(email)
+        save_activities()  # Persist changes
+        return {"message": f"Unregistered {email} from {activity_name}"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
